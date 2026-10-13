@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.bak*
+*.before-*
+backup-*/
+*.log
+.env
+fleet.json
+beacon-vps.json
+assets/*.png
+assets/*.jpg

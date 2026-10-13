@@ -1,0 +1,14 @@
+#!/bin/sh
+# holo-widget — the orchestration lattice, a summoned full-screen hologram.
+#
+# Layer-shell background surface, behind normal windows and click-through.
+# Started on demand by holo-toggle so it costs nothing while closed.
+set -eu
+
+CFG="$HOME/.config/quickshell/holo"
+[ -f "$CFG/shell.qml" ] || { echo "holo-widget: missing $CFG/shell.qml" >&2; exit 1; }
+
+LOG="${XDG_STATE_HOME:-$HOME/.local/state}/holo-widget.log"
+mkdir -p "$(dirname "$LOG")"
+
+exec quickshell -n -p "$CFG" >>"$LOG" 2>&1

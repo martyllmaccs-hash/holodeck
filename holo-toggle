@@ -1,0 +1,30 @@
+#!/bin/sh
+# holo-toggle — raise or dismiss the orchestration lattice.
+#
+# Start it if it is not running, kill it if it is. Costs nothing while closed, which is
+# why the hologram is not autostarted at login.
+set -eu
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && [ -d "$XDG_RUNTIME_DIR/hypr" ]; then
+  HYPRLAND_INSTANCE_SIGNATURE=$(ls "$XDG_RUNTIME_DIR/hypr/" | head -1)
+  export HYPRLAND_INSTANCE_SIGNATURE
+fi
+
+PATTERN="quickshell -n -p $HOME/.config/quickshell/holo"
+PIDS=$(pgrep -f "$PATTERN" || true)
+
+if [ -n "$PIDS" ]; then
+  for p in $PIDS; do kill "$p" 2>/dev/null || true; done
+  echo "holo: dismissed"
+else
+  setsid "$HOME/.local/bin/holo-widget" >/dev/null 2>&1 </dev/null &
+  sleep 3
+  if pgrep -f "$PATTERN" >/dev/null 2>&1; then
+    echo "holo: raised"
+  else
+    echo "holo: failed to start — see ${XDG_STATE_HOME:-$HOME/.local/state}/holo-widget.log" >&2
+    exit 1
+  fi
+fi
