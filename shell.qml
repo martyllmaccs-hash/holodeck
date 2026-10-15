@@ -1,9 +1,9 @@
 // holo — the orchestration lattice: a holographic view of the agent fleet across both
 // machines, live from the Hermes session stores. Non-interactive background layer (current live baseline).
 //
-// Data: $HOME/.local/state/holo/fleet.json for local nodes and
-// $HOME/.local/state/holo/beacon-vps.json for authoritative remote nodes.
-// Telemetry producers are external to this renderer.
+// Data: ~/.local/state/holo/fleet.json (this machine, written by
+// holo-collector.service) plus, when the local collector has not merged it yet,
+// ~/.local/state/holo/beacon-vps.json (pushed from the runtime every minute).
 //
 // Every animation here is timer-driven. `SequentialAnimation on <property>` silently never
 // ran in this Quickshell build, so motion comes from one 40 ms timer feeding wall time and
@@ -29,6 +29,7 @@ ShellRoot {
   property var view: []
   property var linkView: []
   property var particleView: []
+  property var pulseState: null
   property var handoffView: []
   property var totals: ({})
   property real beaconAge: -1
@@ -47,6 +48,15 @@ ShellRoot {
   readonly property color dim: "#3d6f7d"
 
   function value(v) { return v === null || v === undefined ? "?" : v }
+  // Pulse tint by event kind -- every colour already exists elsewhere in the
+  // fleet's own palette (handoff = the standard cyan; a2a/message/smoke-test
+  // get their own existing accent so the pulse stream reads apart by kind).
+  function pulseColor(kind) {
+    if (kind === "handoff") return root.cyan
+    if (kind === "a2a") return "#d8f6ff"
+    if (kind === "smoke_test") return "#2f7c8c"
+    return "#a8f7ff"
+  }
 
   // Read-only runtime proof: actual transformed centres versus drawn endpoints.
   IpcHandler {
@@ -62,6 +72,27 @@ ShellRoot {
       }
       return JSON.stringify({time:root.driftT,nodes:samples})
     }
+    function pulses(): string {
+      return JSON.stringify({now:root.pulseNow,particles:root.particleView.map(function(e){
+        return {id:e.eventId,from:e.fromId,to:e.toId,progress:Renderer.pulseProgress(e,root.pulseNow),
+                point:root.pulsePoint(e,Renderer.pulseProgress(e,root.pulseNow)||0)};
+      })})
+    }
+    function sweep(): string {
+      var now=root.pulseNow, evs=[];
+      for(var i=0;i<root.linkView.length;i++){var l=root.linkView[i];
+        evs.push({eventId:"sweep:"+now+":"+i,eventAt:now,active:true,fromId:l.fromId,toId:l.toId,kind:"smoke_test",crossMachine:!!l.crossMachine});}
+      root.pulseState=Renderer.advancePulses(root.pulseState,evs,now,root.view.map(function(n){return n.key;}));
+      root.particleView=root.pulseState.particles;
+      return "fired "+evs.length+" links";
+    }
+    function probe(): string {
+      var now=root.pulseNow, a=Renderer.key("vps","default"), b=Renderer.key("p1","p1-mila");
+      var e={eventId:"visual-probe:"+now,eventAt:now-3,active:true,fromId:a,toId:b,kind:"smoke_test",crossMachine:true};
+      root.pulseState=Renderer.advancePulses(root.pulseState,[e],now,root.view.map(function(n){return n.key;}));
+      root.particleView=root.pulseState.particles;
+      return e.eventId
+    }
   }
 
   function ageStr(s) {
@@ -71,7 +102,7 @@ ShellRoot {
     return (s / 3600).toFixed(1) + "H"
   }
 
-  // Model has no persistent node/event caches; deleting an identity deletes its effects.
+  // Keep observed journeys; deleting an endpoint still deletes its effects.
   function ingest(text, fromBeacon, exitOk) {
     var snapshot = Renderer.ingest(text, fromBeacon ? root.beacon : root.fleet,
                                    fromBeacon, Date.now() / 1000, exitOk)
@@ -85,7 +116,9 @@ ShellRoot {
     var result = Renderer.build(root.fleet, root.beacon, Date.now() / 1000, panel.width)
     root.view = result.view
     root.linkView = result.links
-    root.particleView = result.particles
+    root.pulseState = Renderer.advancePulses(root.pulseState, result.particles, root.pulseNow,
+      result.view.map(function(n){return n.key;}))
+    root.particleView = root.pulseState.particles
     root.handoffView = result.handoffs
     root.totals = result.totals
     root.beaconAge = result.beaconAge
@@ -146,7 +179,7 @@ ShellRoot {
   function nodeScale(n) {
     var i = root.view.indexOf(n)
     var beat = 0.5 + 0.5 * Math.sin((root.breathe + (i % 7) * 0.14) * 6.283185)
-    return n.layoutScale * Renderer.breathScale(n.alive, n.working, n.state, beat)
+    return n.layoutScale * Renderer.breathScale(n.alive, n.working, n.state, beat, n.activity)
   }
   function cx(n) { return n.x + root.drift(n)[0] + (n.labelOnLeft ? 245 : 55) * root.nodeScale(n) }
   function cy(n) { return n.y + root.drift(n)[1] + 55 * root.nodeScale(n) }
@@ -182,7 +215,7 @@ ShellRoot {
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
     mask: Region {}
 
-    // A user-supplied or procedural background sits beneath the live bot fleet.
+    // Martin's photo is the background; the live bot fleet remains layered above it.
     // Keep the photo clean: no galaxy, grid, stars, or scanline wash over the subject.
     Rectangle { anchors.fill: parent; color: "black" }
     Image {
@@ -223,20 +256,27 @@ ShellRoot {
       }
     }
 
-    // Communication events (including message-derived estimates) traverse once; event age drives motion.
-    // Producer retains completed leaf endpoints through the return event's 6 s window.
+    // One crisp sprite per link, no echo copies. Observation starts a full journey.
     Repeater {
       model: root.particleView
-      Image {
-        property var eventProgress: Renderer.pulseProgress(modelData, root.pulseNow)
+      Item {
+        id: pulseItem
+        property var evt: modelData
+        property var eventProgress: Renderer.pulseProgress(evt, root.pulseNow)
+        property string kind: typeof evt.kind === "string" ? evt.kind : "message"
+        property color tint: root.pulseColor(kind)
+        property var pt: root.pulsePoint(evt, eventProgress === null ? 0 : eventProgress)
         visible: eventProgress !== null
-        source: root.assetDir + "glow-pulse.png"
-        width: 34; height: 34
-        smooth: true
-        opacity: 0.95
-        property var pt: root.pulsePoint(modelData, eventProgress === null ? 0 : eventProgress)
-        x: pt[0] - width / 2
-        y: pt[1] - height / 2
+        x: 0; y: 0
+
+        Image {
+          source: root.assetDir + "glow-pulse.png"
+          width: 34; height: 34
+          smooth: true
+          opacity: 0.95
+          x: pulseItem.pt[0] - width / 2
+          y: pulseItem.pt[1] - height / 2
+        }
       }
     }
 
@@ -253,6 +293,8 @@ ShellRoot {
         tokens: modelData.tokens; calls5h: modelData.calls5h; apiCalls: modelData.apiCalls
         lease: modelData.lease; alive: modelData.alive; flash: modelData.flash
         working: modelData.working
+        activity: modelData.activity === undefined || modelData.activity === null ? 0 : modelData.activity
+        toolActive: modelData.toolActive === true
         disc: modelData.disc
         layoutScale: modelData.layoutScale
         labelOnLeft: modelData.labelOnLeft === true

@@ -18,6 +18,8 @@ Item {
   property var apiCalls: null
   property var lease: null
   property var alive: null
+  property real activity: 0          // 0..1 reported effort: scales breathing/glow beyond the plain working flag
+  property bool toolActive: false    // a dispatched tool call is genuinely in flight right now
   property real flash: 0             // 1.0 right after a handoff lands on this node
   property real breathe: 0           // 0..1 from the shell's 40 ms timer
   property real phase: 0             // per-node offset so the fleet does not pulse in lockstep
@@ -40,21 +42,23 @@ Item {
   implicitHeight: 110
   transformOrigin: Item.TopLeft
 
-  // halo
+  // halo — a working node's glow swells and brightens with how hard it is
+  // reported to be working, not just a flat on/off.
   Image {
     anchors.centerIn: parent
     anchors.horizontalCenterOffset: node.labelOnLeft ? 95 : -95
     source: node.glowSprite
-    width: node.disc * (node.working ? 4.2 : 2.8)
+    width: node.disc * (node.working ? 3.6 + 0.9 * node.activity : 2.8)
     height: width
-    opacity: node.lit * (0.55 + 0.25 * node.flash)
+    opacity: node.lit * (0.55 + 0.25 * node.flash + 0.2 * node.activity)
     smooth: true
+    Behavior on width { NumberAnimation { duration: 400 } }
     Behavior on opacity { NumberAnimation { duration: 500 } }
   }
 
   // breathing on the working nodes — timer-driven, not a property animation:
   // `SequentialAnimation on <prop>` silently never ran in this Quickshell build.
-  scale: node.layoutScale * Renderer.breathScale(node.alive, node.working, node.state, node.beat)
+  scale: node.layoutScale * Renderer.breathScale(node.alive, node.working, node.state, node.beat, node.activity)
 
   // disc
   Rectangle {
@@ -89,6 +93,19 @@ Item {
     border.color: "#a8f7ff"
     opacity: node.lease === true ? 0.35 + 0.45 * node.beat : 0.0
     visible: node.lease === true
+  }
+  // tool-activity ring: a dispatched tool call is genuinely running right now,
+  // independent of any lease -- the signal that used to go dark mid-task.
+  Rectangle {
+    anchors.centerIn: disc
+    width: node.disc + 24
+    height: width
+    radius: width / 2
+    color: "transparent"
+    border.width: 2
+    border.color: node.accent
+    opacity: node.toolActive === true ? 0.25 + 0.4 * node.beat : 0.0
+    visible: node.toolActive === true
   }
 
   Column {

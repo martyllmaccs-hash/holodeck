@@ -1,15 +1,48 @@
 // Pure renderer model shared verbatim by QML and Node offline checks.
 // Freshness policy: local 30 s; VPS 180 s; future tolerance 30 s.
 function number(v) { return typeof v === 'number' && isFinite(v) && v >= 0 ? v : null; }
-function breathScale(alive, working, state, beat) {
+function clamp01(v) { return v<0?0:v>1?1:v; }
+// activity (0..1) blends in: an explicit collector/beacon-reported level wins when
+// present; otherwise a working node still breathes, just at a fixed, lesser amplitude.
+function activityLevel(explicit, working) {
+  var e=number(explicit);
+  if(e!==null)return clamp01(e);
+  return working?1:0;
+}
+function breathScale(alive, working, state, beat, activity) {
   if(alive!==true || ['UNKNOWN','UNLINKED','OFFLINE'].indexOf(state)>=0)return 1;
-  return 1+(working?0.035:0.012)*beat;
+  var a=activityLevel(activity,working);
+  return 1+(working?0.035+0.045*a:0.012)*beat;
 }
 // One traversal per communication event, never a looping activity simulation.
 function pulseProgress(event, now) {
   if(!event || event.active!==true || typeof event.eventId!=='string' || !event.eventId.length || number(event.eventAt)===null)return null;
-  var age=now-event.eventAt;
+  var start=number(event.displayAt)!==null ? event.displayAt : event.eventAt;
+  var age=now-start;
   return age>=0 && age<6 ? age/6 : null;
+}
+// Transport time is evidence time, not animation time. Remember observed events
+// until their single visible traversal ends, even when the producer drops them.
+function advancePulses(prior, events, now, nodeKeys) {
+  var seen={}, particles=[], valid=Object.create(null);
+  nodeKeys.forEach(function(k){valid[k]=true;});
+  if(prior) {
+    Object.keys(prior.seen).forEach(function(id){if(now-prior.seen[id]<120)seen[id]=prior.seen[id];});
+    prior.particles.forEach(function(p){
+      if(now-p.displayAt<6 && valid[p.fromId] && valid[p.toId])particles.push(p);
+    });
+  }
+  events.forEach(function(e){
+    if(seen[e.eventId]!==undefined || !valid[e.fromId] || !valid[e.toId])return;
+    seen[e.eventId]=now;
+    var p={};Object.keys(e).forEach(function(k){p[k]=e[k];});
+    var lane=JSON.stringify([e.fromId,e.toId].sort()), start=now;
+    particles.forEach(function(q){
+      if(JSON.stringify([q.fromId,q.toId].sort())===lane)start=Math.max(start,q.displayAt+6);
+    });
+    p.displayAt=start;particles.push(p);
+  });
+  return {seen:seen,particles:particles};
 }
 function boolean(v) { return typeof v === 'boolean' ? v : null; }
 function key(machine, id) { return JSON.stringify([machine, id]); }
@@ -67,7 +100,11 @@ function build(fleet, beacon, now, screenWidth) {
       tokens:fresh && ti!==null && to!==null ? ti+to : null,
       calls5h:fresh?number(n.calls_5h):null,
       apiCalls:fresh?number(n.api_calls):null,
-      alive:fresh?boolean(n.alive):null,lease:fresh?boolean(n.lease):null,flash:0};
+      alive:fresh?boolean(n.alive):null,lease:fresh?boolean(n.lease):null,flash:0,
+      // Real reported activity (collector tool/lease signal, or beacon state) wins;
+      // a plain working/idle fallback keeps older-schema senders animating sanely.
+      activity:fresh?activityLevel(n.activity,isWorking(st)):0,
+      toolActive:fresh && boolean(n.tool_active)===true};
     seen[k]=item; nodes.push(item);
   }
   for(var i=0;i<fd.nodes.length;i++) if(fd.nodes[i].machine!=='vps') add(fd.nodes[i],'p1',localFresh,fleet);
@@ -76,7 +113,8 @@ function build(fleet, beacon, now, screenWidth) {
   nodes=nodes.filter(function(n){return !collisions[n.key];});
   if(!remoteFresh || !nodes.some(function(n){return n.machine==='vps' && n.id==='default';})) {
     var lana={id:'default',key:key('vps','default'),machine:'vps',label:'LANA',word:'UNLINKED',state:'UNLINKED',working:false,
-      detail:'REMOTE STATE UNAVAILABLE',role:'ORCHESTRATOR',ageS:ba,alive:null,lease:null,tokens:null,apiCalls:null,flash:0};
+      detail:'REMOTE STATE UNAVAILABLE',role:'ORCHESTRATOR',ageS:ba,alive:null,lease:null,tokens:null,apiCalls:null,flash:0,
+      activity:0,toolActive:false};
     nodes.push(lana);
   }
   var vps=[],p1=[],leaves=[];
@@ -152,8 +190,14 @@ function build(fleet, beacon, now, screenWidth) {
   function records(s,fresh,source) {
     if(!fresh||!s)return;
     var d=s.data;
-    function consume(rows,isHandoff) {
+    // kind: 'link' (aggregate connection, edge only) | 'handoff' (true job handoff,
+    // also feeds the handoff list) | 'message' (any other confirmed communication
+    // event -- plain messages, a2a_runtime telemetry, smoke-test traffic, ...).
+    // Both 'handoff' and 'message' are discrete, single-traversal events: every one
+    // of them can produce a pulse, not only handoffs.
+    function consume(rows,kind) {
       if(!Array.isArray(rows))return;
+      var isHandoff=kind==='handoff', isEvent=isHandoff||kind==='message';
       rows.forEach(function(e){
         if(!e||typeof e!=='object')return;
         if(e.stale===true)return;
@@ -174,28 +218,28 @@ function build(fleet, beacon, now, screenWidth) {
         } else if(number(e.age_s)!==null) age=e.age_s+delay;
         var inferred=e.derived===true || e.from_confirmed===false || e.inferred===true || e.source==='user_message';
         // Local collector links reflect worker message recency, not sender communication.
-        if(isHandoff ? !(e.derived===false || e.from_confirmed===true) : e.from_confirmed!==true)inferred=true;
-        var active=(isHandoff || !inferred && e.active===true) && age>=0 && age<6;
-        edge(a,b,active,inferred,e.source || (isHandoff?'handoff':'collector'));
-        if(isHandoff){
-          handoffs.push(e);
-          if(active && number(e.at)!==null &&
-             typeof e.from==='string' && e.from===a.id && typeof e.to==='string' && e.to===b.id &&
-             (e.from_machine==='p1'||e.from_machine==='vps') && (e.to_machine==='p1'||e.to_machine==='vps') &&
-             a!==b) {
-            var particleId=typeof e.id==='string' && e.id.length ? e.id : JSON.stringify([e.at,a.key,b.key]);
-            var signature=JSON.stringify([e.at,a.key,b.key]);
-            if(eventIds[particleId]) {
-              if(eventIds[particleId]!==signature)eventIds[particleId]='conflict';
-            } else {
-              eventIds[particleId]=signature;
-              particles.push({eventId:particleId,eventAt:e.at,fromId:a.key,toId:b.key,active:true,inferred:inferred,crossMachine:a.machine!==b.machine});
-            }
+        if(isEvent ? !(e.derived===false || e.from_confirmed===true) : e.from_confirmed!==true)inferred=true;
+        var active=(isEvent || !inferred && e.active===true) && age>=0 && age<6;
+        edge(a,b,active,inferred,e.source || (isHandoff?'handoff':(kind==='message'?'message':'collector')));
+        if(isHandoff)handoffs.push(e);
+        if(isEvent && active && number(e.at)!==null &&
+           typeof e.from==='string' && e.from===a.id && typeof e.to==='string' && e.to===b.id &&
+           (e.from_machine==='p1'||e.from_machine==='vps') && (e.to_machine==='p1'||e.to_machine==='vps') &&
+           a!==b) {
+          var particleId=typeof e.id==='string' && e.id.length ? e.id : JSON.stringify([e.at,a.key,b.key]);
+          var signature=JSON.stringify([e.at,a.key,b.key]);
+          if(eventIds[particleId]) {
+            if(eventIds[particleId]!==signature)eventIds[particleId]='conflict';
+          } else {
+            eventIds[particleId]=signature;
+            particles.push({eventId:particleId,eventAt:e.at,fromId:a.key,toId:b.key,active:true,inferred:inferred,
+              crossMachine:a.machine!==b.machine,
+              kind:typeof e.kind==='string' && e.kind.length ? e.kind : (isHandoff?'handoff':'message')});
           }
         }
       });
     }
-    consume(d.links,false);consume(d.handoffs,true);
+    consume(d.links,'link');consume(d.handoffs,'handoff');consume(d.messages,'message');
   }
   records(fleet,localFresh,'fleet');records(beacon,remoteFresh,'beacon');
   particles=particles.filter(function(p){return eventIds[p.eventId]!=='conflict';});
@@ -212,4 +256,13 @@ function build(fleet, beacon, now, screenWidth) {
     if(n.tokens===null)unknownTokens=true;else tokens+=n.tokens;});
   return {view:out,links:links,particles:particles,handoffs:handoffs.slice(0,5),beaconAge:ba,vpsStale:!remoteFresh,localFresh:localFresh,omitted:omitted,collisions:Object.keys(collisions).length,
     totals:{nodes_online:unknownOnline?null:online,nodes_total:total,working:working,working_unknown:unknownWorking,tokens_today:unknownTokens?null:tokens,leaves_running:leafCount,handoffs_today:null}};
+}
+
+// QML's JS engine has no CommonJS globals, so `module` stays undefined there and
+// this block is inert; Node (offline tests, `node --check`) picks it up.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    number, breathScale, pulseProgress, advancePulses, boolean, key, validData, stampAge,
+    elapsed, localAge, isWorking, ingest, build, clamp01, activityLevel,
+  };
 }

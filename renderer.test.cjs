@@ -36,7 +36,7 @@ test('leaf topology follows same-machine parent_id, including completed reportin
 });
 test('QML consumes event particles using wall time, not shared looping phase', () => {
   const qml=fs.readFileSync(__dirname+'/shell.qml','utf8');
-  assert.match(qml,/root\.particleView = result\.particles/);
+  assert.match(qml,/root\.particleView = root\.pulseState\.particles/);
   assert.match(qml,/model: root\.particleView/);
   assert.match(qml,/Renderer\.pulseProgress\(modelData, root\.pulseNow\)/);
   assert.doesNotMatch(qml,/root\.pulseT/);
