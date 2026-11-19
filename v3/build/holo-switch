@@ -1,0 +1,20 @@
+#!/bin/sh
+# holo-switch v3|golden|status — choose which Holodeck runs as the desktop background.
+# Neither config is modified; this only stops one Quickshell instance and starts the other.
+set -eu
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && [ -d "$XDG_RUNTIME_DIR/hypr" ]; then
+  HYPRLAND_INSTANCE_SIGNATURE=$(ls "$XDG_RUNTIME_DIR/hypr/" | head -1); export HYPRLAND_INSTANCE_SIGNATURE
+fi
+V3='quickshell -n -p /home/martin/.config/quickshell/holo-v3'
+GOLD='quickshell -n -p /home/martin/.config/quickshell/holo$'
+stop() { for p in $(pgrep -f "$1" || true); do kill "$p" 2>/dev/null || true; done; sleep 1; }
+case "${1:-status}" in
+  v3)     stop "$GOLD"; pgrep -f "$V3" >/dev/null || { setsid "$HOME/.local/bin/holo-v3" >/dev/null 2>&1 </dev/null & }
+          sleep 3; pgrep -f "$V3" >/dev/null && echo "holo: v3 running" || { echo "holo: v3 failed, restoring golden" >&2; setsid "$HOME/.local/bin/holo-widget" >/dev/null 2>&1 </dev/null & exit 1; } ;;
+  golden) stop "$V3"; pgrep -f "$GOLD" >/dev/null || { setsid "$HOME/.local/bin/holo-widget" >/dev/null 2>&1 </dev/null & }
+          sleep 3; pgrep -f "$GOLD" >/dev/null && echo "holo: golden running" || { echo "holo: golden failed to start" >&2; exit 1; } ;;
+  status) pgrep -af "quickshell -n -p /home/martin/.config/quickshell/holo" || echo "holo: none running" ;;
+  *) echo "usage: holo-switch v3|golden|status" >&2; exit 2 ;;
+esac

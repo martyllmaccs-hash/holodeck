@@ -1,0 +1,8 @@
+#!/bin/sh
+# holo-v3 — Holodeck v3 chamber (Lana and Mila static, live fleet overlay). Background layer.
+set -eu
+CFG="$HOME/.config/quickshell/holo-v3"
+[ -f "$CFG/shell.qml" ] || { echo "holo-v3: missing $CFG/shell.qml" >&2; exit 1; }
+LOG="${XDG_STATE_HOME:-$HOME/.local/state}/holo-v3.log"
+mkdir -p "$(dirname "$LOG")"
+exec quickshell -n -p "$CFG" >>"$LOG" 2>&1
